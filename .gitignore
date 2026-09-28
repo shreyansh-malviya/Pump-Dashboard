@@ -1,0 +1,38 @@
+# ---- PlatformIO / ESP32 build ----
+.pio/
+.pioenvs/
+.piolibdeps/
+*.bin
+*.elf
+*.map
+
+# ---- Arduino IDE build ----
+build/
+*.hex
+
+# ---- Filesystem images ----
+*.img
+*.spiffs
+*.littlefs
+
+# ---- Secrets / credentials ----
+# Never commit real WiFi creds, dashboard passwords, or MQTT tokens.
+secrets.h
+credentials.h
+config.local.h
+.env
+.env.*
+!.env.example
+
+# ---- Editor / OS ----
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# ---- Node (for any cloud relay frontend build tooling) ----
+node_modules/
+dist/
+*.log
