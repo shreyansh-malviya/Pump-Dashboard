@@ -1,7 +1,7 @@
 /*
- * fountain_control.ino  —  ESP32 two-motor fountain starter controller
+ * pump_control.ino  —  ESP32 two-motor pump starter controller
  * =====================================================================
- * Controls TWO independent fountain motors, each through ONE active-low
+ * Controls TWO independent pump motors, each through ONE active-low
  * relay wired in series with that motor's contactor coil, downstream of
  * the thermal overload contact (the overload stays HARDWIRED and is NOT
  * controlled by software).
@@ -13,16 +13,24 @@
  *      buttons call the same cmdStart(i) / cmdStop(i).
  *
  * WiFi/dashboard credentials live in secrets.h (gitignored). If WiFi is
- * unavailable the fountain is still fully controllable from the physical
+ * unavailable the pump is still fully controllable from the physical
  * buttons; the web layer is best-effort and never blocks motor control.
  *
- * REACHING IT "FROM ANYWHERE": the ESP32 serves the page on the LAN
- * (http://fountain.local or its IP). Firmware cannot cross your router's
- * NAT by itself — to reach it over the public internet, add ONE network
- * step (see docs/DESIGN.md §5): a tunnel (Tailscale / Cloudflare Tunnel,
- * recommended) or router port-forward + Dynamic DNS.
+ * REACHING IT "FROM ANYWHERE" — two layers:
+ *   - LOCAL: the ESP32 serves the page on the LAN (http://pump.local
+ *     or its IP), Basic-auth gated.
+ *   - PUBLIC: the ESP32 also makes an OUTBOUND TLS connection to an MQTT
+ *     broker (HiveMQ Cloud). Because it dials out, no port-forwarding or
+ *     public IP is needed — it works through NAT/CGNAT. A public website
+ *     (see web/index.html) talks to the same broker over WebSockets, so
+ *     the pump can be controlled from anywhere in the world.
  *
- * This is a FOUNTAIN, not a pumping/irrigation system: there is no
+ * MQTT command auth: The ESP32 trusts all commands arriving on the
+ * pump/cmd topic. You MUST configure your MQTT broker to only allow
+ * authorized users (like a dedicated admin user) to publish to this topic,
+ * using the broker's Access Control Lists (ACLs).
+ *
+ * This is a PUMP, not a pumping/irrigation system: there is no
  * tank-level auto mode and no dry-run/float logic. Control is purely the
  * two manual sources above.
  *
@@ -56,7 +64,7 @@
  *  - Maximum continuous run time: after this the motor is force-stopped
  *    and latched into LOCKOUT, requiring a manual Stop press (or
  *    dashboard reset) before it can start again. Set MAX_RUN_MS = 0 to
- *    disable (a fountain may legitimately run for hours).
+ *    disable (a pump may legitimately run for hours).
  *
  * Serial debug: 115200 baud, prints every state transition and its
  * cause. Bring-up aid, not a permanent feature.
@@ -68,10 +76,12 @@
 
 #include "esp_task_wdt.h"
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
+#include <PubSubClient.h>
 #include "motor.h"
-#include "secrets.h"    // WIFI_SSID/WIFI_PASS, DASH_USER/DASH_PASS (gitignored)
+#include "secrets.h"    // WiFi, dashboard, and MQTT credentials (gitignored)
 
 // ======================= CONFIGURATION ===============================
 
@@ -103,7 +113,7 @@ void cmdStop(uint8_t i)  { if (i < MOTOR_COUNT) motors[i].stopReq  = true; }
 // Minimal, no CSS. Basic-auth gated. Buttons POST to /set, which calls the
 // same command API the physical buttons use, so all safety rules still hold.
 static WebServer  server(80);
-static const char* MDNS_HOST = "fountain";   // -> http://fountain.local/
+static const char* MDNS_HOST = "pump";   // -> http://pump.local/
 
 // Returns false and sends a 401 if the client is not authenticated.
 static bool requireAuth() {
@@ -120,8 +130,8 @@ static String buildPage() {
   h += "<!DOCTYPE html><html><head><meta charset='utf-8'>";
   h += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
   h += "<meta http-equiv='refresh' content='3'>";   // live-ish status, no JS/CSS
-  h += "<title>Fountain Control</title></head><body>";
-  h += "<h1>Fountain Control</h1>";
+  h += "<title>Pump Control</title></head><body>";
+  h += "<h1>Pump Control</h1>";
   h += "<p>Status auto-refreshes every 3 seconds.</p>";
   for (uint8_t i = 0; i < MOTOR_COUNT; i++) {
     Motor& m = motors[i];
@@ -156,9 +166,8 @@ static void handleSet() {
   server.send(303, "text/plain", "ok");
 }
 
-// JSON snapshot — handy for scripts / a future richer frontend.
-static void handleStatus() {
-  if (!requireAuth()) return;
+// Shared JSON snapshot of all motors (used by /status and by MQTT).
+static String stateJson() {
   String j = "{\"motors\":[";
   for (uint8_t i = 0; i < MOTOR_COUNT; i++) {
     if (i) j += ",";
@@ -171,7 +180,13 @@ static void handleStatus() {
     j += "\"}";
   }
   j += "]}";
-  server.send(200, "application/json", j);
+  return j;
+}
+
+// JSON snapshot — handy for scripts / a future richer frontend.
+static void handleStatus() {
+  if (!requireAuth()) return;
+  server.send(200, "application/json", stateJson());
 }
 
 // Connect to WiFi (non-fatal: buttons work regardless). Blocks up to
@@ -200,6 +215,84 @@ static void connectWiFi(uint32_t timeoutMs) {
   }
 }
 
+// ======================= MQTT (public control path) ==================
+// The ESP32 dials OUT to the broker (TLS 8883), so no port-forwarding is
+// needed. It subscribes to a command topic and publishes retained state.
+//   Command topic  pump/cmd    payload:  "<id>:<cmd>"
+//                                            e.g. "0:start"
+//   State topic    pump/state  payload:  stateJson() (retained)
+//   Status topic   pump/status "online"/"offline" (retained, LWT)
+#define TOPIC_CMD    "pump/cmd"
+#define TOPIC_STATE  "pump/state"
+#define TOPIC_STATUS "pump/status"
+
+static WiFiClientSecure tlsClient;
+static PubSubClient      mqtt(tlsClient);
+static bool              g_stateDirty  = true;   // publish state on next chance
+static uint32_t          g_lastMqttTry = 0;
+static uint32_t          g_lastPubMs   = 0;
+
+static void publishState() {
+  if (!mqtt.connected()) return;
+  String j = stateJson();
+  mqtt.publish(TOPIC_STATE, (const uint8_t*)j.c_str(), j.length(), true /*retain*/);
+  g_lastPubMs  = millis();
+  g_stateDirty = false;
+}
+
+// Incoming command: "<id>:<cmd>". Trust the broker's ACLs.
+static void mqttCallback(char* topic, byte* payload, unsigned int len) {
+  String s;
+  s.reserve(len);
+  for (unsigned int i = 0; i < len; i++) s += (char)payload[i];
+
+  int c1 = s.indexOf(':');
+  if (c1 < 0) { Serial.println("[mqtt] bad command format"); return; }
+
+  int    id   = s.substring(0, c1).toInt();
+  String cmd  = s.substring(c1 + 1);
+
+  if (id < 0 || id >= (int)MOTOR_COUNT) { Serial.println("[mqtt] bad motor id"); return; }
+
+  if      (cmd == "start") { cmdStart((uint8_t)id); Serial.printf("[mqtt] start %s\n", motors[id].name); }
+  else if (cmd == "stop")  { cmdStop((uint8_t)id);  Serial.printf("[mqtt] stop  %s\n", motors[id].name); }
+  else                     { Serial.println("[mqtt] unknown command"); }
+}
+
+static void mqttSetup() {
+  tlsClient.setInsecure();   // skip cert validation (simple; see note below).
+  // NOTE: setInsecure() trusts any server cert. To harden, pin HiveMQ's
+  // root CA (ISRG Root X1 / Let's Encrypt) via tlsClient.setCACert(...).
+  mqtt.setServer(MQTT_SERVER, (uint16_t)atoi(MQTT_PORT));
+  mqtt.setCallback(mqttCallback);
+  mqtt.setBufferSize(512);
+  mqtt.setKeepAlive(30);
+}
+
+// Non-blocking reconnect, throttled to one attempt every 5 s.
+static void mqttReconnect() {
+  if (mqtt.connected()) return;
+  uint32_t now = millis();
+  if (now - g_lastMqttTry < 5000) return;
+  g_lastMqttTry = now;
+
+  String cid = "pump-" + String((uint32_t)ESP.getEfuseMac(), HEX);
+  Serial.printf("[mqtt] connecting to %s:%s ...\n", MQTT_SERVER, MQTT_PORT);
+  esp_task_wdt_reset();      // TLS handshake can take a moment
+  bool ok = mqtt.connect(cid.c_str(), MQTT_USER, MQTT_PASS,
+                         TOPIC_STATUS, 0, true, "offline");
+  esp_task_wdt_reset();
+
+  if (ok) {
+    Serial.println("[mqtt] connected");
+    mqtt.publish(TOPIC_STATUS, "online", true);
+    mqtt.subscribe(TOPIC_CMD);
+    g_stateDirty = true;     // push current state right away
+  } else {
+    Serial.printf("[mqtt] connect failed, rc=%d (retrying)\n", mqtt.state());
+  }
+}
+
 // ---- Transition helper (drives the relay and logs the cause) ----
 static void transition(Motor& m, MotorState to, const char* cause) {
   MotorState from = m.state;
@@ -213,6 +306,7 @@ static void transition(Motor& m, MotorState to, const char* cause) {
     m.applyRelay(RELAY_OFF);
   }
   Serial.printf("[%s] %s -> %s  (%s)\n", m.name, stateName(from), stateName(to), cause);
+  g_stateDirty = true;   // reflect the change to MQTT subscribers
 }
 
 // ======================= SETUP / LOOP ================================
@@ -227,7 +321,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(50);
-  Serial.println("\n=== Fountain controller (2 motors) booting — all relays OFF ===");
+  Serial.println("\n=== Pump controller (2 motors) booting — all relays OFF ===");
 
   // 2) Init motors (buttons, state).
   for (uint8_t i = 0; i < MOTOR_COUNT; i++) motors[i].begin(MOTOR_PINS[i]);
@@ -241,6 +335,9 @@ void setup() {
   server.onNotFound([]() { server.send(404, "text/plain", "not found"); });
   server.begin();
   Serial.println("HTTP dashboard started on port 80.");
+
+  // Configure the MQTT (public) path; first connect happens in loop().
+  mqttSetup();
 
   // 4) Enable the Task Watchdog. The API differs across Arduino-ESP32
   //    major versions, so guard on the version macro.
@@ -268,7 +365,14 @@ void setup() {
 
 void loop() {
   esp_task_wdt_reset();          // pet the watchdog
-  server.handleClient();         // serve dashboard requests (non-blocking)
+  server.handleClient();         // serve LAN dashboard requests (non-blocking)
+
+  // MQTT (public path): keep the connection up and pump the client.
+  if (WiFi.status() == WL_CONNECTED) {
+    mqttReconnect();
+    mqtt.loop();
+  }
+
   uint32_t now = millis();
 
   bool anyRunning = false;
@@ -341,4 +445,9 @@ void loop() {
   }
 
   digitalWrite(LED_PIN, anyRunning ? HIGH : LOW);
+
+  // Publish state to MQTT on change, and as a heartbeat every 15 s.
+  if (mqtt.connected() && (g_stateDirty || (now - g_lastPubMs) >= 15000)) {
+    publishState();
+  }
 }

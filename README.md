@@ -40,12 +40,15 @@ and the web UI, and so that an ESP failure degrades gracefully to a normal manua
 |-------|------|--------|
 | 0 | Research, architecture, repo setup | ✅ done |
 | 1 | Local control firmware (2 relays + buttons + safety) | ✅ compile-verified |
-| 2 | Web dashboard on ESP32 (WiFi + password + on/off) | ✅ compile-verified |
-| 3 | Reach it from anywhere (tunnel / port-forward) | ⬜ network step |
+| 2 | LAN web dashboard on ESP32 (WiFi + password) | ✅ compile-verified |
+| 3 | Reach it from anywhere — outbound MQTT + public website | ✅ compile-verified |
 
-> Phases 1–2 are in [firmware/fountain_control/](firmware/fountain_control/). Flash it to an
-> ESP32, open the Serial monitor (115200) to see the assigned IP, then browse to
-> `http://fountain.local/` (or the IP) on the same WiFi and log in.
+> **Firmware** ([firmware/pump_control/](firmware/pump_control/)): flash to an ESP32,
+> open Serial (115200) for the IP. On the same WiFi, browse `http://pump.local/`.
+>
+> **From anywhere** ([web/](web/)): the ESP32 also connects out to your HiveMQ Cloud broker
+> (no port-forwarding), and the static page in `web/` controls it over WebSockets from any
+> hosted URL. See [web/README.md](web/README.md) to publish it (GitHub Pages/Netlify).
 
 ## Repository layout
 

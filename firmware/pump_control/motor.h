@@ -1,5 +1,5 @@
 /*
- * motor.h — types for the two-motor fountain controller.
+ * motor.h — types for the two-motor pump controller.
  *
  * These live in a header (not the .ino) so the Arduino build's auto-
  * generated function prototypes, which reference `Motor`, are placed

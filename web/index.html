@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pump Control</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet"
+  href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<!-- MQTT over WebSockets (browser build). Global: mqtt -->
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5/dist/mqtt.min.js"></script>
+<style>
+  :root {
+    --bg:        #eef2f4;
+    --surface:   #ffffff;
+    --surface-2: #f5f8f9;
+    --border:    #d3dde2;
+    --ink:       #10222d;
+    --muted:     #5a7180;
+    --accent:    #0e7c86;
+    --accent-ink:#ffffff;
+    --run:       #12885f;
+    --run-bg:    #dff4ea;
+    --lockout:   #b06a06;
+    --lockout-bg:#fbeed6;
+    --idle:      #64798a;
+    --idle-bg:   #e6edf0;
+    --danger:    #b23b32;
+    --shadow:    0 1px 2px rgba(16,34,45,.06), 0 6px 20px rgba(16,34,45,.06);
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:        #0c151b;
+      --surface:   #13212a;
+      --surface-2: #0f1b22;
+      --border:    #263a45;
+      --ink:       #e8f1f4;
+      --muted:     #93a7b3;
+      --accent:    #35b3bd;
+      --accent-ink:#042226;
+      --run:       #33c98d;
+      --run-bg:    #0f2f26;
+      --lockout:   #e2a340;
+      --lockout-bg:#33260f;
+      --idle:      #8ba1ad;
+      --idle-bg:   #1a2932;
+      --danger:    #e06a60;
+      --shadow:    0 1px 2px rgba(0,0,0,.3), 0 6px 22px rgba(0,0,0,.35);
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:        #0c151b;
+    --surface:   #13212a;
+    --surface-2: #0f1b22;
+    --border:    #263a45;
+    --ink:       #e8f1f4;
+    --muted:     #93a7b3;
+    --accent:    #35b3bd;
+    --accent-ink:#042226;
+    --run:       #33c98d;
+    --run-bg:    #0f2f26;
+    --lockout:   #e2a340;
+    --lockout-bg:#33260f;
+    --idle:      #8ba1ad;
+    --idle-bg:   #1a2932;
+    --danger:    #e06a60;
+    --shadow:    0 1px 2px rgba(0,0,0,.3), 0 6px 22px rgba(0,0,0,.35);
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  .wrap { max-width: 720px; margin: 0 auto; padding-inline: 16px; padding-block: 0 40px; }
+
+  header.bar {
+    position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5;
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+  }
+  .bar-inner {
+    max-width: 720px; margin: 0 auto; padding: 14px 16px;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; margin-right: auto; }
+  .drop {
+    width: 26px; height: 26px; border-radius: 50% 50% 50% 4px;
+    background: linear-gradient(150deg, var(--accent), color-mix(in srgb, var(--accent) 55%, #0a4b52));
+    transform: rotate(-45deg); flex: none;
+  }
+  h1 { font-size: 17px; font-weight: 600; letter-spacing: .01em; margin: 0; }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; font-weight: 600; letter-spacing: .02em;
+    padding: 4px 10px; border-radius: 999px;
+    background: var(--idle-bg); color: var(--idle);
+  }
+  .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  .pill.ok   { background: var(--run-bg); color: var(--run); }
+  .pill.warn { background: var(--lockout-bg); color: var(--lockout); }
+  .pill.bad  { background: color-mix(in srgb, var(--danger) 16%, var(--surface)); color: var(--danger); }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; box-shadow: var(--shadow);
+  }
+
+  /* ---- Login ---- */
+  .login { margin-top: 28px; padding: 22px; }
+  .login h2 { margin: 0 0 4px; font-size: 20px; font-weight: 600; text-wrap: balance; }
+  .login p.lede { margin: 0 0 18px; color: var(--muted); font-size: 14px; }
+  .field { display: grid; gap: 6px; margin-bottom: 14px; }
+  .field label { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .field input {
+    font: inherit; color: var(--ink); background: var(--surface-2);
+    border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px;
+  }
+  .field input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 460px) { .row2 { grid-template-columns: 1fr; } }
+  .remember { display: flex; align-items: center; gap: 8px; margin: 4px 0 18px; font-size: 13px; color: var(--muted); }
+  .remember input { width: 16px; height: 16px; accent-color: var(--accent); }
+
+  button {
+    font: inherit; font-weight: 600; cursor: pointer;
+    border-radius: 9px; border: 1px solid transparent; padding: 11px 16px;
+    transition: filter .12s ease, transform .04s ease;
+  }
+  button:active { transform: translateY(1px); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-primary { background: var(--accent); color: var(--accent-ink); width: 100%; }
+  .btn-primary:hover:not(:disabled) { filter: brightness(1.06); }
+
+  .note { font-size: 12.5px; color: var(--muted); margin-top: 16px; }
+  .note code { font-family: "IBM Plex Mono", monospace; font-size: 12px; }
+
+  /* ---- Panel ---- */
+  .panel { margin-top: 22px; display: grid; gap: 14px; }
+  .waiting { padding: 26px; text-align: center; color: var(--muted); }
+  .motor { padding: 18px 18px 16px; }
+  .motor-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+  .motor-name { font-size: 16px; font-weight: 600; }
+  .motor-sub { font-size: 12px; color: var(--muted); }
+  .state {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 13px; font-weight: 700; letter-spacing: .03em;
+    padding: 6px 12px; border-radius: 999px; background: var(--idle-bg); color: var(--idle);
+  }
+  .state.run  { background: var(--run-bg);  color: var(--run); }
+  .state.lock { background: var(--lockout-bg); color: var(--lockout); }
+  .state .dot { width: 9px; height: 9px; border-radius: 50%; background: currentColor; }
+  .state.run .dot { animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+  @media (prefers-reduced-motion: reduce) { .state.run .dot { animation: none; } }
+
+  .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .btn-start { background: var(--run); color: #fff; }
+  .btn-stop  { background: transparent; color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
+  .btn-start:hover:not(:disabled), .btn-stop:hover:not(:disabled) { filter: brightness(1.05); }
+
+  .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 2px 2px 0; }
+  .link-btn { background: none; border: none; color: var(--muted); padding: 6px; font-size: 13px; font-weight: 500; }
+  .link-btn:hover { color: var(--ink); }
+
+  footer { margin-top: 26px; font-size: 12px; color: var(--muted); text-align: center; }
+  footer .mono { font-size: 11.5px; }
+</style>
+</head>
+<body>
+  <header class="bar">
+    <div class="bar-inner">
+      <div class="brand"><span class="drop" aria-hidden="true"></span><h1>Pump Control</h1></div>
+      <span id="brokerPill" class="pill"><span class="dot"></span><span id="brokerText">Disconnected</span></span>
+      <span id="devicePill" class="pill"><span class="dot"></span><span id="deviceText">Device: unknown</span></span>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <!-- LOGIN -->
+    <section id="login" class="card login">
+      <h2>Connect to your pump</h2>
+      <p class="lede">Enter your MQTT broker credentials and the pump password. Nothing is stored unless you ask it to be.</p>
+      <form id="loginForm" autocomplete="off">
+        <div class="field">
+          <label for="host">Broker host</label>
+          <input id="host" class="mono" placeholder="xxxxxxxx.s1.eu.hivemq.cloud" required>
+        </div>
+        <div class="row2">
+          <div class="field">
+            <label for="wsPort">WebSocket port</label>
+            <input id="wsPort" class="mono" value="8884" inputmode="numeric" required>
+          </div>
+          <div class="field">
+            <label for="mqttUser">MQTT username</label>
+            <input id="mqttUser" required>
+          </div>
+        </div>
+        <div class="field">
+          <label for="mqttPass">MQTT password</label>
+          <input id="mqttPass" type="password" required>
+        </div>
+        <label class="remember"><input id="remember" type="checkbox"> Remember on this device</label>
+        <button type="submit" class="btn-primary" id="connectBtn">Connect</button>
+      </form>
+      <p class="note" id="loginNote">
+        The ESP32 now trusts all commands arriving on the command topic. Ensure your MQTT broker restricts publishing access to this dashboard's user. HiveMQ Cloud secure WebSocket port is <code>8884</code>.
+      </p>
+    </section>
+
+    <!-- CONTROL PANEL -->
+    <section id="panel" class="panel" hidden>
+      <div class="toolbar">
+        <span class="motor-sub">Live status over MQTT · commands are password-checked by the device</span>
+        <button class="link-btn" id="disconnectBtn">Disconnect</button>
+      </div>
+      <div id="motors" class="panel"></div>
+      <div id="waiting" class="card waiting">Connected to the broker. Waiting for the pump to report in…</div>
+    </section>
+
+    <footer>
+      Talks to your broker over <span class="mono">wss</span> · topics
+      <span class="mono">pump/cmd</span>, <span class="mono">pump/state</span>,
+      <span class="mono">pump/status</span>.
+    </footer>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+
+  var TOPIC_CMD = "pump/cmd", TOPIC_STATE = "pump/state", TOPIC_STATUS = "pump/status";
+  var LS_KEY = "pump-control-conn";
+
+  var client = null, lastMotors = null;
+
+  var $ = function (id) { return document.getElementById(id); };
+  var loginEl = $("login"), panelEl = $("panel"), motorsEl = $("motors"), waitingEl = $("waiting");
+
+  // ---- status pills ----
+  function setBroker(state, text) {
+    var p = $("brokerPill"); p.className = "pill" + (state ? " " + state : "");
+    $("brokerText").textContent = text;
+  }
+  function setDevice(state, text) {
+    var p = $("devicePill"); p.className = "pill" + (state ? " " + state : "");
+    $("deviceText").textContent = text;
+  }
+
+  // ---- persistence (per-viewer convenience only) ----
+  function loadSaved() {
+    try {
+      var raw = localStorage.getItem(LS_KEY);
+      if (!raw) return;
+      var s = JSON.parse(raw);
+      if (s.host) $("host").value = s.host;
+      if (s.wsPort) $("wsPort").value = s.wsPort;
+      if (s.mqttUser) $("mqttUser").value = s.mqttUser;
+      if (s.mqttPass) $("mqttPass").value = s.mqttPass;
+      $("remember").checked = true;
+    } catch (e) { /* storage may be unavailable */ }
+  }
+  function saveOrClear(data) {
+    try {
+      if ($("remember").checked) localStorage.setItem(LS_KEY, JSON.stringify(data));
+      else localStorage.removeItem(LS_KEY);
+    } catch (e) { /* ignore */ }
+  }
+
+  // ---- rendering ----
+  function stateClass(s) { return s === "RUNNING" ? "run" : (s === "LOCKOUT" ? "lock" : ""); }
+  function stateLabel(s) { return s === "RUNNING" ? "Running" : (s === "LOCKOUT" ? "Locked out" : "Off"); }
+
+  function render(motors) {
+    lastMotors = motors;
+    waitingEl.hidden = motors.length > 0;
+    motorsEl.innerHTML = "";
+    motors.forEach(function (m) {
+      var card = document.createElement("div");
+      card.className = "card motor";
+      var cls = stateClass(m.state);
+      card.innerHTML =
+        '<div class="motor-head">' +
+          '<div><div class="motor-name"></div><div class="motor-sub">Motor ' + m.id + '</div></div>' +
+          '<span class="state ' + cls + '"><span class="dot"></span><span class="lbl"></span></span>' +
+        '</div>' +
+        '<div class="controls">' +
+          '<button class="btn-start">Start</button>' +
+          '<button class="btn-stop">Stop</button>' +
+        '</div>';
+      card.querySelector(".motor-name").textContent = m.name || ("Motor " + m.id);
+      card.querySelector(".state .lbl").textContent = stateLabel(m.state);
+      var connected = client && client.connected;
+      var bStart = card.querySelector(".btn-start"), bStop = card.querySelector(".btn-stop");
+      bStart.disabled = !connected; bStop.disabled = !connected;
+      bStart.onclick = function () { sendCmd(m.id, "start"); };
+      bStop.onclick  = function () { sendCmd(m.id, "stop"); };
+      motorsEl.appendChild(card);
+    });
+  }
+
+  function sendCmd(id, cmd) {
+    if (!client || !client.connected) return;
+    // payload: "<id>:<cmd>"
+    client.publish(TOPIC_CMD, id + ":" + cmd, { qos: 0 });
+  }
+
+  // ---- connect / disconnect ----
+  function connect(host, wsPort, user, pass) {
+    var url = "wss://" + host + ":" + wsPort + "/mqtt";
+    setBroker("warn", "Connecting…");
+    var opts = {
+      username: user, password: pass,
+      clientId: "pump-web-" + Math.random().toString(16).slice(2, 10),
+      clean: true, reconnectPeriod: 4000, connectTimeout: 12000
+    };
+    try { client = mqtt.connect(url, opts); }
+    catch (e) { setBroker("bad", "Bad broker URL"); return; }
+
+    client.on("connect", function () {
+      setBroker("ok", "Connected");
+      loginEl.hidden = true; panelEl.hidden = false;
+      client.subscribe([TOPIC_STATE, TOPIC_STATUS]);
+      if (!lastMotors) render([]); else render(lastMotors);
+    });
+    client.on("reconnect", function () { setBroker("warn", "Reconnecting…"); });
+    client.on("close",      function () { setBroker("", "Disconnected"); });
+    client.on("offline",    function () { setBroker("bad", "Offline"); });
+    client.on("error", function (err) {
+      setBroker("bad", "Error");
+      $("loginNote").textContent = "Connection error: " + (err && err.message ? err.message : err);
+    });
+    client.on("message", function (topic, payload) {
+      var text = payload.toString();
+      if (topic === TOPIC_STATE) {
+        try { var obj = JSON.parse(text); if (obj && obj.motors) render(obj.motors); } catch (e) {}
+      } else if (topic === TOPIC_STATUS) {
+        if (text === "online") setDevice("ok", "Device: online");
+        else setDevice("bad", "Device: offline");
+      }
+      if (lastMotors) render(lastMotors); // refresh button enabled-state
+    });
+  }
+
+  function disconnect() {
+    if (client) { try { client.end(true); } catch (e) {} client = null; }
+    setBroker("", "Disconnected"); setDevice("", "Device: unknown");
+    panelEl.hidden = true; loginEl.hidden = false;
+  }
+
+  // ---- wire up ----
+  $("loginForm").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var host = $("host").value.trim(), wsPort = $("wsPort").value.trim();
+    var user = $("mqttUser").value.trim(), pass = $("mqttPass").value;
+    saveOrClear({ host: host, wsPort: wsPort, mqttUser: user, mqttPass: pass });
+    connect(host, wsPort, user, pass);
+  });
+  $("disconnectBtn").addEventListener("click", disconnect);
+
+  loadSaved();
+  setBroker("", "Disconnected");
+  setDevice("", "Device: unknown");
+})();
+</script>
+</body>
+</html>
