@@ -39,9 +39,13 @@ and the web UI, and so that an ESP failure degrades gracefully to a normal manua
 | Phase | What | Status |
 |-------|------|--------|
 | 0 | Research, architecture, repo setup | ✅ done |
-| 1 | Local control firmware (relays + button sensing + safety) | ⬜ next |
-| 2 | Web dashboard on ESP32 (async server + WebSocket + auth) | ⬜ |
-| 3 | Secure remote access | ⬜ |
+| 1 | Local control firmware (2 relays + buttons + safety) | ✅ compile-verified |
+| 2 | Web dashboard on ESP32 (WiFi + password + on/off) | ✅ compile-verified |
+| 3 | Reach it from anywhere (tunnel / port-forward) | ⬜ network step |
+
+> Phases 1–2 are in [firmware/fountain_control/](firmware/fountain_control/). Flash it to an
+> ESP32, open the Serial monitor (115200) to see the assigned IP, then browse to
+> `http://fountain.local/` (or the IP) on the same WiFi and log in.
 
 ## Repository layout
 

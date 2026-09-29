@@ -7,10 +7,20 @@
  * controlled by software).
  *
  * Each motor can be turned on/off from TWO sources that drive the SAME
- * state machine:
- *   1. Physical Start/Stop buttons on the panel (implemented here).
- *   2. The web dashboard (later phase) — it just calls cmdStart(i) /
- *      cmdStop(i). No WiFi/web code is included in this bring-up sketch.
+ * state machine (so all safety rules below apply to both):
+ *   1. Physical Start/Stop buttons on the panel.
+ *   2. The password-protected web dashboard served by the ESP32 — its
+ *      buttons call the same cmdStart(i) / cmdStop(i).
+ *
+ * WiFi/dashboard credentials live in secrets.h (gitignored). If WiFi is
+ * unavailable the fountain is still fully controllable from the physical
+ * buttons; the web layer is best-effort and never blocks motor control.
+ *
+ * REACHING IT "FROM ANYWHERE": the ESP32 serves the page on the LAN
+ * (http://fountain.local or its IP). Firmware cannot cross your router's
+ * NAT by itself — to reach it over the public internet, add ONE network
+ * step (see docs/DESIGN.md §5): a tunnel (Tailscale / Cloudflare Tunnel,
+ * recommended) or router port-forward + Dynamic DNS.
  *
  * This is a FOUNTAIN, not a pumping/irrigation system: there is no
  * tank-level auto mode and no dry-run/float logic. Control is purely the
@@ -57,7 +67,11 @@
  */
 
 #include "esp_task_wdt.h"
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
 #include "motor.h"
+#include "secrets.h"    // WIFI_SSID/WIFI_PASS, DASH_USER/DASH_PASS (gitignored)
 
 // ======================= CONFIGURATION ===============================
 
@@ -81,9 +95,110 @@ static const uint32_t WDT_TIMEOUT_S = 8;             // watchdog timeout (second
 static Motor motors[MOTOR_COUNT];
 
 // ---- Command API — the single entry point for BOTH control sources ----
-// Physical buttons (in loop) and the future web dashboard both call these.
+// Physical buttons (in loop) and the web dashboard both call these.
 void cmdStart(uint8_t i) { if (i < MOTOR_COUNT) motors[i].startReq = true; }
 void cmdStop(uint8_t i)  { if (i < MOTOR_COUNT) motors[i].stopReq  = true; }
+
+// ======================= WEB DASHBOARD ===============================
+// Minimal, no CSS. Basic-auth gated. Buttons POST to /set, which calls the
+// same command API the physical buttons use, so all safety rules still hold.
+static WebServer  server(80);
+static const char* MDNS_HOST = "fountain";   // -> http://fountain.local/
+
+// Returns false and sends a 401 if the client is not authenticated.
+static bool requireAuth() {
+  if (!server.authenticate(DASH_USER, DASH_PASS)) {
+    server.requestAuthentication();
+    return false;
+  }
+  return true;
+}
+
+static String buildPage() {
+  String h;
+  h.reserve(1400);
+  h += "<!DOCTYPE html><html><head><meta charset='utf-8'>";
+  h += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
+  h += "<meta http-equiv='refresh' content='3'>";   // live-ish status, no JS/CSS
+  h += "<title>Fountain Control</title></head><body>";
+  h += "<h1>Fountain Control</h1>";
+  h += "<p>Status auto-refreshes every 3 seconds.</p>";
+  for (uint8_t i = 0; i < MOTOR_COUNT; i++) {
+    Motor& m = motors[i];
+    h += "<h2>";
+    h += m.name;
+    h += " &mdash; ";
+    h += stateName(m.state);
+    h += "</h2><form method='POST' action='/set'>";
+    h += "<input type='hidden' name='id' value='";
+    h += i;
+    h += "'><button name='cmd' value='start'>Start</button> ";
+    h += "<button name='cmd' value='stop'>Stop</button></form>";
+  }
+  h += "</body></html>";
+  return h;
+}
+
+static void handleRoot() {
+  if (!requireAuth()) return;
+  server.send(200, "text/html", buildPage());
+}
+
+static void handleSet() {
+  if (!requireAuth()) return;
+  int    id  = server.hasArg("id") ? server.arg("id").toInt() : -1;
+  String cmd = server.arg("cmd");
+  if (id >= 0 && id < (int)MOTOR_COUNT) {
+    if      (cmd == "start") { cmdStart((uint8_t)id); Serial.printf("[web] start %s\n", motors[id].name); }
+    else if (cmd == "stop")  { cmdStop((uint8_t)id);  Serial.printf("[web] stop  %s\n", motors[id].name); }
+  }
+  server.sendHeader("Location", "/");   // back to the status page
+  server.send(303, "text/plain", "ok");
+}
+
+// JSON snapshot — handy for scripts / a future richer frontend.
+static void handleStatus() {
+  if (!requireAuth()) return;
+  String j = "{\"motors\":[";
+  for (uint8_t i = 0; i < MOTOR_COUNT; i++) {
+    if (i) j += ",";
+    j += "{\"id\":";
+    j += i;
+    j += ",\"name\":\"";
+    j += motors[i].name;
+    j += "\",\"state\":\"";
+    j += stateName(motors[i].state);
+    j += "\"}";
+  }
+  j += "]}";
+  server.send(200, "application/json", j);
+}
+
+// Connect to WiFi (non-fatal: buttons work regardless). Blocks up to
+// timeoutMs; called before the watchdog is armed.
+static void connectWiFi(uint32_t timeoutMs) {
+  Serial.printf("WiFi: connecting to \"%s\" ...\n", WIFI_SSID);
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - start) < timeoutMs) {
+    delay(250);
+    Serial.print('.');
+  }
+  Serial.println();
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("WiFi connected. IP: ");
+    Serial.println(WiFi.localIP());
+    if (MDNS.begin(MDNS_HOST)) {
+      MDNS.addService("http", "tcp", 80);
+      Serial.printf("Dashboard (LAN): http://%s.local/  or  http://%s/\n",
+                    MDNS_HOST, WiFi.localIP().toString().c_str());
+    }
+  } else {
+    Serial.println("WiFi NOT connected — physical buttons still work; will keep retrying.");
+  }
+}
 
 // ---- Transition helper (drives the relay and logs the cause) ----
 static void transition(Motor& m, MotorState to, const char* cause) {
@@ -117,7 +232,17 @@ void setup() {
   // 2) Init motors (buttons, state).
   for (uint8_t i = 0; i < MOTOR_COUNT; i++) motors[i].begin(MOTOR_PINS[i]);
 
-  // 3) Enable the Task Watchdog. The API differs across Arduino-ESP32
+  // 3) Join WiFi (best-effort) and start the dashboard. Done BEFORE the
+  //    watchdog is armed so the connect wait can't trip it.
+  connectWiFi(15000);
+  server.on("/",       handleRoot);
+  server.on("/set",    handleSet);
+  server.on("/status", handleStatus);
+  server.onNotFound([]() { server.send(404, "text/plain", "not found"); });
+  server.begin();
+  Serial.println("HTTP dashboard started on port 80.");
+
+  // 4) Enable the Task Watchdog. The API differs across Arduino-ESP32
   //    major versions, so guard on the version macro.
 #if defined(ESP_ARDUINO_VERSION) && \
     ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
@@ -143,6 +268,7 @@ void setup() {
 
 void loop() {
   esp_task_wdt_reset();          // pet the watchdog
+  server.handleClient();         // serve dashboard requests (non-blocking)
   uint32_t now = millis();
 
   bool anyRunning = false;
