@@ -67,7 +67,7 @@
 
   var TOPIC_CMD = "pump/cmd", TOPIC_STATE = "pump/state", TOPIC_STATUS = "pump/status";
   var LS_KEY = "pump-control-conn";
-  var MIN_OFF_MS = 5000;   // must match firmware MIN_OFF_MS (restart lockout window)
+  var MIN_OFF_MS = 2000;   // must match firmware MIN_OFF_MS (restart lockout window)
   var client = null, lastMotors = null;
   var cooldownUntil = {};  // per-motor: timestamp until which Start is disabled
   var prevState = {};      // per-motor: last seen state (to detect a stop)

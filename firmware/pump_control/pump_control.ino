@@ -98,7 +98,7 @@ static const uint8_t LED_PIN = 2;   // onboard LED: ON while any motor runs
 
 // ---- Timing constants ----
 static const uint32_t DEBOUNCE_MS   = 30;            // button debounce window
-static const uint32_t MIN_OFF_MS    = 5000;          // 5 s min gap stop -> next start
+static const uint32_t MIN_OFF_MS    = 2000;          // 2 s min gap stop -> next start
 static const uint32_t MAX_RUN_MS    = 2UL * 60UL * 60UL * 1000UL;  // 2 h; 0 = disabled
 static const uint32_t WDT_TIMEOUT_S = 8;             // watchdog timeout (seconds)
 
