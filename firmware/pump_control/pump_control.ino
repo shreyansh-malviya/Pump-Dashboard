@@ -1,7 +1,7 @@
 /*
  * pump_control.ino  —  ESP32 two-motor pump starter controller
  * =====================================================================
- * Controls TWO independent pump motors, each through ONE active-low
+ * Controls THREE independent pump motors (2x 5 HP, 1x 7.5 HP), each through ONE active-low
  * relay wired in series with that motor's contactor coil, downstream of
  * the thermal overload contact (the overload stays HARDWIRED and is NOT
  * controlled by software).
@@ -89,8 +89,9 @@
 //      flash pins 6-11, and input-only pins 34-39 which lack pull-ups) ----
 static const MotorPins MOTOR_PINS[] = {
   // name        relay  start  stop
-  { "Motor-A",   25,    32,    33 },
-  { "Motor-B",   26,    27,    14 },
+  { "5 HP #1",   25,    32,    33 },
+  { "5 HP #2",   26,    27,    14 },
+  { "7.5 HP",    13,    18,    19 },
 };
 static const uint8_t MOTOR_COUNT = sizeof(MOTOR_PINS) / sizeof(MOTOR_PINS[0]);
 
@@ -359,7 +360,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(50);
-  Serial.println("\n=== Pump controller (2 motors) booting — all relays OFF ===");
+  Serial.println("\n=== Pump controller (3 motors) booting — all relays OFF ===");
 
   // 2) Init motors (buttons, state).
   for (uint8_t i = 0; i < MOTOR_COUNT; i++) motors[i].begin(MOTOR_PINS[i]);
