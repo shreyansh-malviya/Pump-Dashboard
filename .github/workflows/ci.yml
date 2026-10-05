@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  firmware-build:
+    name: Build ESP32 firmware (PlatformIO)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            firmware/pump_control/.pio
+          key: pio-${{ runner.os }}-${{ hashFiles('firmware/pump_control/platformio.ini') }}
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Provide placeholder secrets (real secrets.h is gitignored)
+        run: cp firmware/pump_control/secrets_example.h firmware/pump_control/secrets.h
+
+      - name: Build
+        run: pio run -d firmware/pump_control
+
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so past commits are scanned too
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  web-lint:
+    name: Validate web page
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: HTML5 validate
+        uses: Cyb3r-Jak3/html5validator-action@v7.2.0
+        with:
+          root: web/
