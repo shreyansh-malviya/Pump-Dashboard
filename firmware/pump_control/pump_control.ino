@@ -189,20 +189,58 @@ static void handleStatus() {
   server.send(200, "application/json", stateJson());
 }
 
-// Connect to WiFi (non-fatal: buttons work regardless). Blocks up to
-// timeoutMs; called before the watchdog is armed.
-static void connectWiFi(uint32_t timeoutMs) {
-  Serial.printf("WiFi: connecting to \"%s\" ...\n", WIFI_SSID);
-  WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+// Connect to WiFi — tries primary, then fallback. Non-fatal: buttons work
+// regardless. Blocks up to timeoutMs per network; called before the WDT is armed.
+static bool tryConnect(const char* ssid, const char* pass, uint32_t timeoutMs) {
+  Serial.printf("WiFi: trying \"%s\" ...", ssid);
+  WiFi.begin(ssid, pass);
   uint32_t start = millis();
   while (WiFi.status() != WL_CONNECTED && (millis() - start) < timeoutMs) {
     delay(250);
     Serial.print('.');
   }
   Serial.println();
-  if (WiFi.status() == WL_CONNECTED) {
+  return WiFi.status() == WL_CONNECTED;
+}
+
+// Diagnostic: list every 2.4 GHz network the ESP32 can actually see.
+// If a target SSID is missing here, it is 5 GHz or out of range — not a
+// password problem. Flags whether our two SSIDs are visible.
+static void scanWiFi() {
+  Serial.println("WiFi: scanning (2.4 GHz only — the ESP32 cannot see 5 GHz)...");
+  int n = WiFi.scanNetworks();
+  if (n <= 0) { Serial.println("  (no networks found)"); return; }
+  bool seen1 = false, seen2 = false;
+  for (int i = 0; i < n; i++) {
+    String ssid = WiFi.SSID(i);
+    if (ssid == WIFI_SSID)  seen1 = true;
+    if (ssid == WIFI_SSID2) seen2 = true;
+    Serial.printf("  %2d) ch%-2d  %4d dBm  %-4s  \"%s\"\n",
+                  i + 1, WiFi.channel(i), WiFi.RSSI(i),
+                  (WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "open" : "enc"),
+                  ssid.c_str());
+  }
+  Serial.printf("WiFi: \"%s\" visible: %s | \"%s\" visible: %s\n",
+                WIFI_SSID,  seen1 ? "YES" : "NO (5 GHz or out of range)",
+                WIFI_SSID2, seen2 ? "YES" : "NO (5 GHz or out of range)");
+  WiFi.scanDelete();
+}
+
+static void connectWiFi(uint32_t timeoutMs) {
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+
+  scanWiFi();
+
+  bool ok = tryConnect(WIFI_SSID, WIFI_PASS, timeoutMs);
+  if (!ok) {
+    Serial.println("WiFi: primary failed, trying fallback...");
+    WiFi.disconnect(true);
+    delay(500);
+    ok = tryConnect(WIFI_SSID2, WIFI_PASS2, timeoutMs);
+  }
+
+  if (ok) {
     Serial.print("WiFi connected. IP: ");
     Serial.println(WiFi.localIP());
     if (MDNS.begin(MDNS_HOST)) {
