@@ -67,7 +67,11 @@
 
   var TOPIC_CMD = "pump/cmd", TOPIC_STATE = "pump/state", TOPIC_STATUS = "pump/status";
   var LS_KEY = "pump-control-conn";
+  var MIN_OFF_MS = 5000;   // must match firmware MIN_OFF_MS (restart lockout window)
   var client = null, lastMotors = null;
+  var cooldownUntil = {};  // per-motor: timestamp until which Start is disabled
+  var prevState = {};      // per-motor: last seen state (to detect a stop)
+  var startBtns = {};      // per-motor: the Start button element
   var $ = function (id) { return document.getElementById(id); };
 
   function setBroker(t) { $("brokerText").textContent = t; }
@@ -89,13 +93,35 @@
     } catch (e) {}
   }
 
+  // Decide how the Start button should look right now for one motor.
+  function refreshStartBtn(id, state) {
+    var b = startBtns[id];
+    if (!b) return;
+    var connected = client && client.connected;
+    if (state === "LOCKOUT") {            // max-run tripped: must Stop to reset
+      b.textContent = "Locked"; b.disabled = true; return;
+    }
+    var rem = cooldownUntil[id] ? Math.ceil((cooldownUntil[id] - Date.now()) / 1000) : 0;
+    if (rem > 0) {                        // min-off window after a stop
+      b.textContent = "Wait " + rem + "s"; b.disabled = true; return;
+    }
+    b.textContent = "Start"; b.disabled = !connected;
+  }
+
   function render(motors) {
     lastMotors = motors;
     $("waiting").hidden = motors.length > 0;
     var tbody = $("rows");
     tbody.innerHTML = "";
+    startBtns = {};
     var connected = client && client.connected;
     motors.forEach(function (m) {
+      // A motor entering OFF (from RUNNING or LOCKOUT) starts the min-off window.
+      if (m.state === "OFF" && prevState[m.id] && prevState[m.id] !== "OFF") {
+        cooldownUntil[m.id] = Date.now() + MIN_OFF_MS;
+      }
+      prevState[m.id] = m.state;
+
       var tr = document.createElement("tr");
       var tdName = document.createElement("td");
       tdName.textContent = (m.name || ("Motor " + m.id)) + " (#" + m.id + ")";
@@ -103,8 +129,9 @@
       tdState.textContent = m.state;
       var tdCtl = document.createElement("td");
       var bStart = document.createElement("button");
-      bStart.textContent = "Start"; bStart.disabled = !connected;
       bStart.onclick = function () { sendCmd(m.id, "start"); };
+      startBtns[m.id] = bStart;
+      refreshStartBtn(m.id, m.state);
       var bStop = document.createElement("button");
       bStop.textContent = "Stop"; bStop.disabled = !connected;
       bStop.onclick = function () { sendCmd(m.id, "stop"); };
@@ -116,8 +143,18 @@
 
   function sendCmd(id, cmd) {
     if (!client || !client.connected) return;
+    if (cmd === "stop") {                 // begin the countdown immediately on stop
+      cooldownUntil[id] = Date.now() + MIN_OFF_MS;
+      refreshStartBtn(id, "OFF");
+    }
     client.publish(TOPIC_CMD, id + ":" + cmd, { qos: 0 });  // payload: "<id>:<cmd>"
   }
+
+  // Tick the countdown so the Start buttons update once per second.
+  setInterval(function () {
+    if (!lastMotors) return;
+    lastMotors.forEach(function (m) { refreshStartBtn(m.id, m.state); });
+  }, 1000);
 
   function connect(user, pass) {
     var url = "wss://" + BROKER_HOST + ":" + WS_PORT + "/mqtt";
