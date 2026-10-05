@@ -32,17 +32,11 @@
 <!-- LOGIN -->
 <form id="loginForm" autocomplete="off">
   <fieldset>
-    <legend>Connect to broker</legend>
-    <label for="host">Broker host</label>
-    <input id="host" class="mono" placeholder="xxxxxxxx.s1.eu.hivemq.cloud" required>
-
-    <label for="wsPort">WebSocket port</label>
-    <input id="wsPort" class="mono" value="8884" inputmode="numeric" required>
-
-    <label for="mqttUser">MQTT username</label>
+    <legend>Log in</legend>
+    <label for="mqttUser">Username</label>
     <input id="mqttUser" required>
 
-    <label for="mqttPass">MQTT password</label>
+    <label for="mqttPass">Password</label>
     <input id="mqttPass" type="password" required>
 
     <label><input id="remember" type="checkbox"> Remember on this device</label>
@@ -50,8 +44,8 @@
     <p><button type="submit" id="connectBtn">Connect</button></p>
   </fieldset>
 </form>
-<p id="loginNote"><small>HiveMQ Cloud secure WebSocket port is 8884. Commands are
-  controlled by your broker's user permissions (ACLs).</small></p>
+<p id="loginNote"><small>Use your MQTT username and password. Commands are controlled by
+  your broker's user permissions (ACLs).</small></p>
 
 <!-- CONTROL -->
 <div id="panel" hidden>
@@ -66,6 +60,11 @@
 <script>
 (function () {
   "use strict";
+
+  // ---- Fixed broker endpoint (not secret; only username/password are entered) ----
+  var BROKER_HOST = "212e9da62e29468696f66278311398bb.s1.eu.hivemq.cloud";
+  var WS_PORT     = "8884";   // HiveMQ Cloud secure WebSocket port
+
   var TOPIC_CMD = "pump/cmd", TOPIC_STATE = "pump/state", TOPIC_STATUS = "pump/status";
   var LS_KEY = "pump-control-conn";
   var client = null, lastMotors = null;
@@ -78,8 +77,6 @@
     try {
       var s = JSON.parse(localStorage.getItem(LS_KEY) || "null");
       if (!s) return;
-      if (s.host) $("host").value = s.host;
-      if (s.wsPort) $("wsPort").value = s.wsPort;
       if (s.mqttUser) $("mqttUser").value = s.mqttUser;
       if (s.mqttPass) $("mqttPass").value = s.mqttPass;
       $("remember").checked = true;
@@ -122,8 +119,8 @@
     client.publish(TOPIC_CMD, id + ":" + cmd, { qos: 0 });  // payload: "<id>:<cmd>"
   }
 
-  function connect(host, wsPort, user, pass) {
-    var url = "wss://" + host + ":" + wsPort + "/mqtt";
+  function connect(user, pass) {
+    var url = "wss://" + BROKER_HOST + ":" + WS_PORT + "/mqtt";
     setBroker("connecting…");
     var opts = {
       username: user, password: pass,
@@ -166,10 +163,9 @@
 
   $("loginForm").addEventListener("submit", function (e) {
     e.preventDefault();
-    var host = $("host").value.trim(), wsPort = $("wsPort").value.trim();
     var user = $("mqttUser").value.trim(), pass = $("mqttPass").value;
-    saveOrClear({ host: host, wsPort: wsPort, mqttUser: user, mqttPass: pass });
-    connect(host, wsPort, user, pass);
+    saveOrClear({ mqttUser: user, mqttPass: pass });
+    connect(user, pass);
   });
   $("disconnectBtn").addEventListener("click", disconnect);
 
