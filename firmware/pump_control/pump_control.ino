@@ -88,10 +88,12 @@
 // ---- Pin assignments (ESP32 safe GPIOs; avoids strapping pins 0/2/12/15,
 //      flash pins 6-11, and input-only pins 34-39 which lack pull-ups) ----
 static const MotorPins MOTOR_PINS[] = {
+  // Pins grouped by ESP32 side for a clean wiring layout:
+  //   relays on LEFT-edge GPIOs (32/33/25), buttons on RIGHT-edge GPIOs.
   // name        relay  start  stop
-  { "5 HP #1",   25,    32,    33 },
-  { "5 HP #2",   26,    27,    14 },
-  { "7.5 HP",    13,    18,    19 },
+  { "5 HP #1",   32,    23,    22 },   // start GPIO23, stop GPIO22
+  { "5 HP #2",   33,    21,    19 },   // start GPIO21, stop GPIO19
+  { "7.5 HP",    25,    17,    16 },   // start GPIO17, stop GPIO16
 };
 static const uint8_t MOTOR_COUNT = sizeof(MOTOR_PINS) / sizeof(MOTOR_PINS[0]);
 
