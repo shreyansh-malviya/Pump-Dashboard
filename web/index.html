@@ -4,207 +4,299 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pump Control</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap">
 <!-- MQTT over WebSockets (browser build). Global: mqtt -->
 <script src="https://cdn.jsdelivr.net/npm/mqtt@5/dist/mqtt.min.js"></script>
 <style>
-  /* Minimal, plain. The page is fully usable even without this CSS. */
-  body { max-width: 640px; margin: 1rem auto; padding: 0 1rem;
-         font-family: sans-serif; line-height: 1.5; color: #000; background: #fff; }
-  h1 { font-size: 1.3rem; }
-  fieldset { margin-bottom: 1rem; }
-  label { display: block; margin: .5rem 0 .15rem; }
-  input { width: 100%; max-width: 360px; padding: .35rem; }
-  input[type=checkbox] { width: auto; }
-  button { padding: .4rem .8rem; margin-right: .5rem; cursor: pointer; }
-  table { border-collapse: collapse; width: 100%; margin-top: .5rem; }
-  th, td { border: 1px solid #999; padding: .4rem .5rem; text-align: left; }
-  .mono { font-family: monospace; }
-  #status { margin: .5rem 0; }
-  [hidden] { display: none; }
+  :root{
+    --sky1:#5c94fc; --sky2:#9ad0ff;
+    --pipe:#00a800; --pipe-d:#006000; --pipe-l:#58d858;
+    --coin:#fcd000; --coin-d:#c07000;
+    --brick:#c84c0c; --brick-d:#7a2800; --grass:#2ee04b;
+    --panel:#12123a; --ink:#ffffff;
+    --red:#e23b2e; --red-d:#8a140c; --green:#2ec04b; --green-d:#0c6a1e;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0; min-height:100%;}
+  body{
+    font-family:"Press Start 2P",monospace; color:var(--ink);
+    background:#0a0a1e; image-rendering:pixelated; line-height:1.6;
+    min-height:100vh; display:flex; flex-direction:column;
+  }
+  .box{ background:var(--panel); border:4px solid #000;
+        box-shadow:0 0 0 4px #2a2a6a, 6px 6px 0 0 rgba(0,0,0,.5); }
+
+  /* ---------- HUD ---------- */
+  header{ display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;
+    padding:12px 16px; background:#000; border-bottom:4px solid #2a2a6a; font-size:11px; }
+  .title{ color:var(--coin); text-shadow:3px 3px 0 var(--coin-d); font-size:15px; letter-spacing:1px; }
+  .hud{ display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+  .coin{ display:inline-block; width:15px; height:15px; margin-right:7px; vertical-align:-3px;
+    background:var(--coin); border:3px solid var(--coin-d); border-radius:50%;
+    box-shadow:inset -3px 0 0 rgba(0,0,0,.25); animation:spin 1.6s steps(6) infinite; }
+  .online{ display:inline-flex; align-items:center; font-size:10px; }
+  .online .dot{ width:10px;height:10px; margin-right:7px; border:2px solid #000; }
+  .online.on{ color:var(--green); } .online.on .dot{ background:var(--green); animation:blink 1s steps(2) infinite; }
+  .online.off{ color:#ff6b6b; } .online.off .dot{ background:#555; }
+  .btn-mini{ font-family:inherit; font-size:9px; color:#fff; background:#2a2a6a; cursor:pointer;
+    border:3px solid #000; padding:7px 9px; box-shadow:0 3px 0 0 #000; }
+  .btn-mini:active{ transform:translateY(3px); box-shadow:0 0 0 0 #000; }
+
+  /* ---------- stage ---------- */
+  .stage{ position:relative; flex:1; overflow:hidden;
+    background:linear-gradient(var(--sky1),var(--sky2)); padding:26px 16px 0;
+    display:flex; flex-direction:column; }
+  .cloud{ position:absolute; width:82px; height:24px; background:#fff; border-radius:16px;
+    box-shadow:22px 0 0 2px #fff, -22px 4px 0 -2px #fff, 0 -12px 0 -4px #fff;
+    opacity:.9; animation:drift 30s linear infinite; pointer-events:none; }
+  .cloud.c2{ top:92px; left:60%; transform:scale(.8); animation-duration:40s; }
+  .cloud.c3{ top:44px; left:28%; transform:scale(.6); animation-duration:34s; }
+
+  .content{ position:relative; z-index:2; flex:1; }
+
+  /* ---------- login ---------- */
+  .login{ max-width:420px; margin:14px auto; padding:20px; }
+  .login h2{ font-size:13px; margin:0 0 16px; color:var(--coin); text-align:center; }
+  .field{ margin-bottom:14px; }
+  .field label{ display:block; font-size:9px; margin-bottom:7px; color:#9ad0ff; }
+  .field input[type=text], .field input[type=password]{
+    width:100%; font-family:inherit; font-size:11px; color:#fff; background:#05051a;
+    border:3px solid #000; box-shadow:inset 0 0 0 2px #2a2a6a; padding:11px; }
+  .field input:focus{ outline:none; box-shadow:inset 0 0 0 2px var(--coin); }
+  .remember{ display:flex; align-items:center; gap:9px; font-size:9px; color:#bcecff; margin:4px 0 16px; }
+  .remember input{ width:16px; height:16px; }
+  #loginNote{ font-size:9px; color:#ff8a8a; min-height:14px; text-align:center; }
+  .status{ font-size:9px; color:#8a8af0; text-align:center; margin:12px 0 0; }
+
+  /* ---------- machines ---------- */
+  .machines{ display:flex; gap:16px; justify-content:center; flex-wrap:wrap; max-width:960px; margin:0 auto; }
+  .machine{ width:280px; max-width:92vw; padding:14px; text-align:center; }
+  .machine h2{ font-size:11px; margin:0 0 10px; }
+  .state{ display:inline-block; font-size:9px; padding:5px 8px; border:3px solid #000; margin-bottom:12px; }
+  .state.run{ background:var(--green); color:#032; box-shadow:0 0 0 3px #0c6a1e; }
+  .state.off{ background:#444; color:#bbb; box-shadow:0 0 0 3px #222; }
+  .state.cool{ background:var(--coin); color:#6a3800; box-shadow:0 0 0 3px var(--coin-d); }
+
+  .well{ position:relative; height:140px; margin:0 auto 12px; width:120px; }
+  .pipe{ position:absolute; bottom:0; left:50%; transform:translateX(-50%); width:86px; height:62px;
+    background:var(--pipe); border:4px solid #000;
+    box-shadow:inset 10px 0 0 var(--pipe-l), inset -14px 0 0 var(--pipe-d); }
+  .pipe::before{ content:""; position:absolute; top:-16px; left:-9px; right:-9px; height:18px;
+    background:var(--pipe); border:4px solid #000;
+    box-shadow:inset 10px 0 0 var(--pipe-l), inset -14px 0 0 var(--pipe-d); }
+  .spout{ position:absolute; bottom:74px; left:50%; width:0; }
+  .drop{ position:absolute; width:8px; height:8px; background:#3fc6ff; border:2px solid #1f86c9; left:0; bottom:0; opacity:0; }
+  .run .drop{ animation:spray 1.1s infinite; }
+  .run .drop:nth-child(1){ animation-delay:0s;   --dx:-26px; }
+  .run .drop:nth-child(2){ animation-delay:.18s; --dx:-10px; }
+  .run .drop:nth-child(3){ animation-delay:.36s; --dx:6px; }
+  .run .drop:nth-child(4){ animation-delay:.54s; --dx:22px; }
+  .run .drop:nth-child(5){ animation-delay:.72s; --dx:-2px; }
+  .pool{ position:absolute; bottom:56px; left:50%; transform:translateX(-50%); width:70px; height:8px;
+    background:#3fc6ff; border:3px solid #1f86c9; opacity:0; }
+  .run .pool{ opacity:.9; animation:shimmer .5s steps(2) infinite; }
+  .run .pipe{ box-shadow:inset 10px 0 0 var(--pipe-l), inset -14px 0 0 var(--pipe-d), 0 0 0 4px #000, 0 0 18px 4px #7fffd4; }
+
+  .controls{ display:flex; gap:10px; justify-content:center; }
+  .btn{ font-family:inherit; font-size:10px; color:#fff; cursor:pointer; padding:12px 14px; border:4px solid #000;
+    text-shadow:2px 2px 0 rgba(0,0,0,.4); box-shadow:0 5px 0 0 #000; transition:transform .04s, box-shadow .04s; }
+  .btn:active{ transform:translateY(4px); box-shadow:0 1px 0 0 #000; }
+  .btn.start{ background:var(--green); box-shadow:0 5px 0 0 var(--green-d); }
+  .btn.start:active{ box-shadow:0 1px 0 0 var(--green-d); }
+  .btn.stop{ background:var(--red); box-shadow:0 5px 0 0 var(--red-d); }
+  .btn.stop:active{ box-shadow:0 1px 0 0 var(--red-d); }
+  .btn:disabled{ background:#555; box-shadow:0 5px 0 0 #222; color:#999; cursor:not-allowed; text-shadow:none; }
+  .btn:disabled:active{ transform:none; }
+  #waiting{ text-align:center; font-size:10px; color:#05354f; }
+
+  /* ---------- ground + mascot ---------- */
+  .ground{ position:relative; z-index:1; height:70px; margin-top:14px;
+    background:repeating-linear-gradient(90deg,var(--brick) 0 30px,var(--brick-d) 30px 32px),var(--brick);
+    border-top:6px solid var(--grass); }
+  .mascot{ position:absolute; bottom:64px; left:24px; width:52px; height:68px; z-index:3; }
+  .idle{ animation:hop 1.4s steps(2) infinite; }
+
+  footer{ background:#000; text-align:center; padding:11px; font-size:9px; color:#8a8af0; }
+
+  @keyframes spin{ to{ transform:scaleX(.2); } }
+  @keyframes blink{ 50%{ opacity:.25; } }
+  @keyframes drift{ from{ transform:translateX(-140px); } to{ transform:translateX(100vw); } }
+  @keyframes spray{ 0%{opacity:0;transform:translate(0,0) scale(1);} 15%{opacity:1;} 100%{opacity:0;transform:translate(var(--dx),-78px) scale(.6);} }
+  @keyframes shimmer{ 50%{ transform:translateX(-50%) scaleX(.9); } }
+  @keyframes hop{ 50%{ transform:translateY(-6px); } }
+  @media (prefers-reduced-motion: reduce){ *{ animation:none !important; } .run .drop{ opacity:.8; } }
 </style>
 </head>
 <body>
-<h1>Pump Control</h1>
+  <header>
+    <div class="title">PUMP&nbsp;QUEST</div>
+    <div class="hud">
+      <span><span class="coin"></span>x&nbsp;0427</span>
+      <span id="deviceHud" class="online off"><span class="dot"></span><span id="deviceText">OFFLINE</span></span>
+      <button id="disconnectBtn" class="btn-mini" type="button" hidden>QUIT</button>
+    </div>
+  </header>
 
-<p id="status">Broker: <span id="brokerText">disconnected</span>
-  &middot; Device: <span id="deviceText">unknown</span></p>
+  <main class="stage">
+    <div class="cloud"></div><div class="cloud c2"></div><div class="cloud c3"></div>
 
-<!-- LOGIN -->
-<form id="loginForm" autocomplete="off">
-  <fieldset>
-    <legend>Log in</legend>
-    <label for="mqttUser">Username</label>
-    <input id="mqttUser" required>
+    <div class="content">
+      <!-- LOGIN -->
+      <section id="login" class="login box">
+        <h2>&#9654; INSERT CREDENTIALS</h2>
+        <form id="loginForm" autocomplete="off">
+          <div class="field"><label for="mqttUser">USERNAME</label>
+            <input id="mqttUser" type="text" required></div>
+          <div class="field"><label for="mqttPass">PASSWORD</label>
+            <input id="mqttPass" type="password" required></div>
+          <label class="remember"><input id="remember" type="checkbox"> REMEMBER ON THIS DEVICE</label>
+          <button id="connectBtn" class="btn start" type="submit" style="width:100%">CONNECT</button>
+        </form>
+        <p id="loginNote"></p>
+        <p class="status">LINK: <span id="brokerText">OFFLINE</span></p>
+      </section>
 
-    <label for="mqttPass">Password</label>
-    <input id="mqttPass" type="password" required>
+      <!-- PANEL -->
+      <section id="panel" hidden>
+        <div id="machines" class="machines"></div>
+        <p id="waiting">WAITING FOR THE PUMP TO REPORT IN&hellip;</p>
+      </section>
+    </div>
 
-    <label><input id="remember" type="checkbox"> Remember on this device</label>
+    <div class="ground">
+      <svg class="mascot idle" viewBox="0 0 14 18" shape-rendering="crispEdges" aria-label="Pumpy mascot">
+        <rect x="4" y="0" width="6" height="1" fill="#ffcf00"/><rect x="3" y="1" width="8" height="2" fill="#ffcf00"/>
+        <rect x="2" y="3" width="10" height="1" fill="#e0a400"/>
+        <rect x="4" y="4" width="6" height="1" fill="#59b7ff"/><rect x="3" y="5" width="8" height="5" fill="#3fa0ff"/>
+        <rect x="2" y="10" width="10" height="3" fill="#2f86e6"/><rect x="3" y="13" width="8" height="1" fill="#2f86e6"/>
+        <rect x="5" y="6" width="1" height="2" fill="#fff"/><rect x="8" y="6" width="1" height="2" fill="#fff"/>
+        <rect x="5" y="7" width="1" height="1" fill="#000"/><rect x="8" y="7" width="1" height="1" fill="#000"/>
+        <rect x="6" y="9" width="2" height="1" fill="#0a3a66"/>
+        <rect x="11" y="7" width="2" height="1" fill="#cfd6e0"/><rect x="12" y="6" width="1" height="1" fill="#cfd6e0"/>
+        <rect x="4" y="14" width="2" height="3" fill="#1f5fae"/><rect x="8" y="14" width="2" height="3" fill="#1f5fae"/>
+        <rect x="3" y="17" width="3" height="1" fill="#000"/><rect x="8" y="17" width="3" height="1" fill="#000"/>
+      </svg>
+    </div>
+  </main>
 
-    <p><button type="submit" id="connectBtn">Connect</button></p>
-  </fieldset>
-</form>
-<p id="loginNote"></p>
-
-<!-- CONTROL -->
-<div id="panel" hidden>
-  <p><button id="disconnectBtn">Disconnect</button></p>
-  <table>
-    <thead><tr><th>Motor</th><th>State</th><th>Control</th></tr></thead>
-    <tbody id="rows"></tbody>
-  </table>
-  <p id="waiting"><small>Waiting for the pump to report in&hellip;</small></p>
-</div>
+  <footer>Controls your pumps over MQTT</footer>
 
 <script>
 (function () {
   "use strict";
-
-  // ---- Fixed broker endpoint (not secret; only username/password are entered) ----
   var BROKER_HOST = "212e9da62e29468696f66278311398bb.s1.eu.hivemq.cloud";
-  var WS_PORT     = "8884";   // HiveMQ Cloud secure WebSocket port
-
+  var WS_PORT = "8884";
   var TOPIC_CMD = "pump/cmd", TOPIC_STATE = "pump/state", TOPIC_STATUS = "pump/status";
   var LS_KEY = "pump-control-conn";
-  var MIN_OFF_MS = 2000;   // must match firmware MIN_OFF_MS (restart lockout window)
-  var client = null, lastMotors = null;
-  var cooldownUntil = {};  // per-motor: timestamp until which Start is disabled
-  var prevState = {};      // per-motor: last seen state (to detect a stop)
-  var startBtns = {};      // per-motor: the Start button element
+  var MIN_OFF_MS = 2000;
+  var client = null, lastMotors = null, cooldownUntil = {}, prevState = {}, startBtns = {};
   var $ = function (id) { return document.getElementById(id); };
 
-  function setBroker(t) { $("brokerText").textContent = t; }
-  function setDevice(t) { $("deviceText").textContent = t; }
+  function setBroker(t){ $("brokerText").textContent = (t + "").toUpperCase(); }
+  function setDevice(t){
+    $("deviceText").textContent = (t === "online" ? "P1 ONLINE" : (t === "offline" ? "OFFLINE" : "NO SIGNAL"));
+    $("deviceHud").className = "online " + (t === "online" ? "on" : "off");
+  }
 
-  function loadSaved() {
-    try {
-      var s = JSON.parse(localStorage.getItem(LS_KEY) || "null");
-      if (!s) return;
-      if (s.mqttUser) $("mqttUser").value = s.mqttUser;
-      if (s.mqttPass) $("mqttPass").value = s.mqttPass;
+  function loadSaved(){
+    try{ var s = JSON.parse(localStorage.getItem(LS_KEY) || "null"); if(!s) return;
+      if(s.mqttUser) $("mqttUser").value = s.mqttUser;
+      if(s.mqttPass) $("mqttPass").value = s.mqttPass;
       $("remember").checked = true;
-    } catch (e) {}
+    }catch(e){}
   }
-  function saveOrClear(data) {
-    try {
-      if ($("remember").checked) localStorage.setItem(LS_KEY, JSON.stringify(data));
-      else localStorage.removeItem(LS_KEY);
-    } catch (e) {}
+  function saveOrClear(d){
+    try{ if($("remember").checked) localStorage.setItem(LS_KEY, JSON.stringify(d)); else localStorage.removeItem(LS_KEY); }catch(e){}
   }
 
-  // Decide how the Start button should look right now for one motor.
-  function refreshStartBtn(id, state) {
-    var b = startBtns[id];
-    if (!b) return;
+  function refreshStartBtn(id, state){
+    var b = startBtns[id]; if(!b) return;
     var connected = client && client.connected;
-    if (state === "LOCKOUT") {            // max-run tripped: must Stop to reset
-      b.textContent = "Locked"; b.disabled = true; return;
-    }
-    var rem = cooldownUntil[id] ? Math.ceil((cooldownUntil[id] - Date.now()) / 1000) : 0;
-    if (rem > 0) {                        // min-off window after a stop
-      b.textContent = "Wait " + rem + "s"; b.disabled = true; return;
-    }
-    b.textContent = "Start"; b.disabled = !connected;
+    if(state === "LOCKOUT"){ b.textContent = "LOCKED"; b.disabled = true; return; }
+    var rem = cooldownUntil[id] ? Math.ceil((cooldownUntil[id] - Date.now())/1000) : 0;
+    if(rem > 0){ b.textContent = "WAIT " + rem; b.disabled = true; return; }
+    b.textContent = "START"; b.disabled = !connected;
   }
 
-  function render(motors) {
+  function render(motors){
     lastMotors = motors;
     $("waiting").hidden = motors.length > 0;
-    var tbody = $("rows");
-    tbody.innerHTML = "";
-    startBtns = {};
+    var cont = $("machines"); cont.innerHTML = ""; startBtns = {};
     var connected = client && client.connected;
-    motors.forEach(function (m) {
-      // A motor entering OFF (from RUNNING or LOCKOUT) starts the min-off window.
-      if (m.state === "OFF" && prevState[m.id] && prevState[m.id] !== "OFF") {
-        cooldownUntil[m.id] = Date.now() + MIN_OFF_MS;
-      }
+    motors.forEach(function(m){
+      if(m.state === "OFF" && prevState[m.id] && prevState[m.id] !== "OFF") cooldownUntil[m.id] = Date.now() + MIN_OFF_MS;
       prevState[m.id] = m.state;
-
-      var tr = document.createElement("tr");
-      var tdName = document.createElement("td");
-      tdName.textContent = (m.name || ("Motor " + m.id)) + " (#" + m.id + ")";
-      var tdState = document.createElement("td");
-      tdState.textContent = m.state;
-      var tdCtl = document.createElement("td");
-      var bStart = document.createElement("button");
-      bStart.onclick = function () { sendCmd(m.id, "start"); };
+      var running = m.state === "RUNNING";
+      var sec = document.createElement("section");
+      sec.className = "machine box";
+      sec.innerHTML =
+        '<h2></h2><span class="state"></span>' +
+        '<div class="well' + (running ? ' run' : '') + '">' +
+          '<div class="spout"><span class="drop"></span><span class="drop"></span><span class="drop"></span><span class="drop"></span><span class="drop"></span></div>' +
+          '<div class="pool"></div><div class="pipe"></div></div>' +
+        '<div class="controls"><button class="btn start">START</button><button class="btn stop">STOP</button></div>';
+      sec.querySelector("h2").textContent = m.name || ("MOTOR " + m.id);
+      var badge = sec.querySelector(".state");
+      if(running){ badge.textContent = "▶ RUNNING"; badge.classList.add("run"); }
+      else if(m.state === "LOCKOUT"){ badge.textContent = "✖ LOCKED"; badge.classList.add("cool"); }
+      else { badge.textContent = "■ OFF"; badge.classList.add("off"); }
+      var bStart = sec.querySelector(".btn.start"), bStop = sec.querySelector(".btn.stop");
+      bStart.onclick = function(){ sendCmd(m.id, "start"); };
+      bStop.onclick = function(){ sendCmd(m.id, "stop"); };
+      bStop.disabled = !connected;
       startBtns[m.id] = bStart;
       refreshStartBtn(m.id, m.state);
-      var bStop = document.createElement("button");
-      bStop.textContent = "Stop"; bStop.disabled = !connected;
-      bStop.onclick = function () { sendCmd(m.id, "stop"); };
-      tdCtl.appendChild(bStart); tdCtl.appendChild(bStop);
-      tr.appendChild(tdName); tr.appendChild(tdState); tr.appendChild(tdCtl);
-      tbody.appendChild(tr);
+      cont.appendChild(sec);
     });
   }
 
-  function sendCmd(id, cmd) {
-    if (!client || !client.connected) return;
-    if (cmd === "stop") {                 // begin the countdown immediately on stop
-      cooldownUntil[id] = Date.now() + MIN_OFF_MS;
-      refreshStartBtn(id, "OFF");
-    }
-    client.publish(TOPIC_CMD, id + ":" + cmd, { qos: 0 });  // payload: "<id>:<cmd>"
+  function sendCmd(id, cmd){
+    if(!client || !client.connected) return;
+    if(cmd === "stop"){ cooldownUntil[id] = Date.now() + MIN_OFF_MS; refreshStartBtn(id, "OFF"); }
+    client.publish(TOPIC_CMD, id + ":" + cmd, { qos: 0 });
   }
 
-  // Tick the countdown so the Start buttons update once per second.
-  setInterval(function () {
-    if (!lastMotors) return;
-    lastMotors.forEach(function (m) { refreshStartBtn(m.id, m.state); });
-  }, 1000);
-
-  function connect(user, pass) {
+  function connect(user, pass){
     var url = "wss://" + BROKER_HOST + ":" + WS_PORT + "/mqtt";
     setBroker("connecting…");
-    var opts = {
-      username: user, password: pass,
-      clientId: "pump-web-" + Math.random().toString(16).slice(2, 10),
-      clean: true, reconnectPeriod: 4000, connectTimeout: 12000
-    };
-    try { client = mqtt.connect(url, opts); }
-    catch (e) { setBroker("bad URL"); return; }
-
-    client.on("connect", function () {
+    var opts = { username:user, password:pass, clientId:"pump-web-" + Math.random().toString(16).slice(2,10),
+      clean:true, reconnectPeriod:4000, connectTimeout:12000 };
+    try{ client = mqtt.connect(url, opts); }catch(e){ setBroker("bad url"); return; }
+    client.on("connect", function(){
       setBroker("connected");
-      $("loginForm").hidden = true; $("loginNote").hidden = true; $("panel").hidden = false;
+      $("login").hidden = true; $("panel").hidden = false; $("disconnectBtn").hidden = false;
       client.subscribe([TOPIC_STATE, TOPIC_STATUS]);
       render(lastMotors || []);
     });
-    client.on("reconnect", function () { setBroker("reconnecting…"); });
-    client.on("close",     function () { setBroker("disconnected"); });
-    client.on("offline",   function () { setBroker("offline"); });
-    client.on("error", function (err) {
-      setBroker("error");
-      $("loginNote").textContent = "Connection error: " + (err && err.message ? err.message : err);
-      $("loginNote").hidden = false;
-    });
-    client.on("message", function (topic, payload) {
+    client.on("reconnect", function(){ setBroker("reconnecting…"); });
+    client.on("close", function(){ setBroker("disconnected"); });
+    client.on("offline", function(){ setBroker("offline"); });
+    client.on("error", function(err){ setBroker("error"); $("loginNote").textContent = "ERROR: " + (err && err.message ? err.message : err); });
+    client.on("message", function(topic, payload){
       var text = payload.toString();
-      if (topic === TOPIC_STATE) {
-        try { var o = JSON.parse(text); if (o && o.motors) render(o.motors); } catch (e) {}
-      } else if (topic === TOPIC_STATUS) {
-        setDevice(text === "online" ? "online" : "offline");
-      }
-      if (lastMotors) render(lastMotors);
+      if(topic === TOPIC_STATE){ try{ var o = JSON.parse(text); if(o && o.motors) render(o.motors); }catch(e){} }
+      else if(topic === TOPIC_STATUS){ setDevice(text === "online" ? "online" : "offline"); }
+      if(lastMotors) render(lastMotors);
     });
   }
 
-  function disconnect() {
-    if (client) { try { client.end(true); } catch (e) {} client = null; }
+  function disconnect(){
+    if(client){ try{ client.end(true); }catch(e){} client = null; }
     setBroker("disconnected"); setDevice("unknown");
-    $("panel").hidden = true; $("loginForm").hidden = false; $("loginNote").hidden = false;
+    $("panel").hidden = true; $("login").hidden = false; $("disconnectBtn").hidden = true;
   }
 
-  $("loginForm").addEventListener("submit", function (e) {
+  $("loginForm").addEventListener("submit", function(e){
     e.preventDefault();
     var user = $("mqttUser").value.trim(), pass = $("mqttPass").value;
-    saveOrClear({ mqttUser: user, mqttPass: pass });
+    saveOrClear({ mqttUser:user, mqttPass:pass });
     connect(user, pass);
   });
   $("disconnectBtn").addEventListener("click", disconnect);
 
+  setInterval(function(){ if(lastMotors) lastMotors.forEach(function(m){ refreshStartBtn(m.id, m.state); }); }, 1000);
   loadSaved();
 })();
 </script>
