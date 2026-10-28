@@ -1,5 +1,5 @@
 /*
- * pump_control.ino  —  ESP32 two-motor pump starter controller
+ * pump_control.ino  —  ESP32 three-motor pump starter controller
  * =====================================================================
  * Controls THREE independent pump motors (2x 5 HP, 1x 7.5 HP), each through ONE active-low
  * relay wired in series with that motor's contactor coil, downstream of
@@ -7,10 +7,10 @@
  * controlled by software).
  *
  * Each motor can be turned on/off from TWO sources that drive the SAME
- * state machine (so all safety rules below apply to both):
- *   1. Physical Start/Stop buttons on the panel.
- *   2. The password-protected web dashboard served by the ESP32 — its
- *      buttons call the same cmdStart(i) / cmdStop(i).
+ * state machine:
+ *   1. One physical push button per motor (momentary NO) that TOGGLES:
+ *      press when off -> start, press when running/locked -> stop.
+ *   2. The password-protected web dashboard / MQTT -> cmdStart(i)/cmdStop(i).
  *
  * WiFi/dashboard credentials live in secrets.h (gitignored). If WiFi is
  * unavailable the pump is still fully controllable from the physical
@@ -41,13 +41,14 @@
  *    3.3 V-trigger-compatible, opto-isolated, ACTIVE-LOW module.
  *  - Active-low relay: IN = LOW  -> relay ENERGIZED (motor ON)
  *                      IN = HIGH -> relay OFF        (motor OFF)  <-- boot default
- *  - Start button: momentary NO, between START pin and GND.
- *      INPUT_PULLUP -> idle reads HIGH, pressed reads LOW.
- *  - Stop button: momentary NC, between STOP pin and GND. FAIL-SAFE:
- *      INPUT_PULLUP -> closed (not pressed) reads LOW  = "run allowed"
- *                      open  (pressed OR wire cut) reads HIGH = "STOP".
- *      A broken stop wire therefore forces the motor OFF and keeps it off.
- *  - Common ground: ESP32 GND, relay module GND, and button GND all tied.
+ *  - One push button per motor: momentary NO, between the button pin and GND.
+ *      INPUT_PULLUP -> idle reads HIGH, pressed (shorts to GND) reads LOW.
+ *      A press TOGGLES the motor (off->start, running/lockout->stop). No
+ *      cut-wire fail-safe; a broken button wire simply can't command.
+ *  - One run LED per motor (LED -> resistor -> GND, active-HIGH): ON while running.
+ *  - One state LED (connectivity): solid = MQTT online, slow blink = WiFi only,
+ *      fast blink = connecting, off = no WiFi.
+ *  - Common ground: ESP32 GND, relay/button/LED grounds all tied.
  *  - Feed relay coils from a separate 5 V supply (JD-VCC), sharing ground
  *    with the ESP32. Add an external ~10 k pull-UP on each relay IN line
  *    so the relay stays de-energized during the boot glitch.
@@ -85,23 +86,22 @@
 
 // ======================= CONFIGURATION ===============================
 
-// ---- Pin assignments (ESP32 safe GPIOs; avoids strapping pins 0/2/12/15,
-//      flash pins 6-11, and input-only pins 34-39 which lack pull-ups) ----
+// ---- Pin assignments (ESP32). One relay, one toggle button, one run LED per
+//      motor, plus a connectivity state LED. GPIO5/15/2 are strapping pins but
+//      safe in these roles (relay boots OFF; LEDs boot harmless). ----
 static const MotorPins MOTOR_PINS[] = {
-  // Pins grouped by ESP32 side for a clean wiring layout:
-  //   relays on LEFT-edge GPIOs (32/33/25), buttons on RIGHT-edge GPIOs.
-  // name        relay  start  stop
-  { "5 HP #1",   32,    23,    22 },   // start GPIO23, stop GPIO22
-  { "5 HP #2",   33,    21,    19 },   // start GPIO21, stop GPIO19
-  { "7.5 HP",    25,    17,    16 },   // start GPIO17, stop GPIO16
+  // name        relay  button  led
+  { "5 HP #1",    5,     21,    15 },
+  { "5 HP #2",   18,     26,     2 },
+  { "7.5 HP",    19,     25,     4 },
 };
 static const uint8_t MOTOR_COUNT = sizeof(MOTOR_PINS) / sizeof(MOTOR_PINS[0]);
 
-static const uint8_t LED_PIN = 2;   // onboard LED: ON while any motor runs
+static const uint8_t STATE_LED_PIN = 16;   // connectivity LED (RX2 / GPIO16)
 
 // ---- Timing constants ----
 static const uint32_t DEBOUNCE_MS   = 30;            // button debounce window
-static const uint32_t MIN_OFF_MS    = 2000;          // 2 s min gap stop -> next start
+static const uint32_t MIN_OFF_MS    = 0;             // min gap stop -> next start (0 = disabled)
 static const uint32_t MAX_RUN_MS    = 2UL * 60UL * 60UL * 1000UL;  // 2 h; 0 = disabled
 static const uint32_t WDT_TIMEOUT_S = 8;             // watchdog timeout (seconds)
 
@@ -209,23 +209,25 @@ static bool tryConnect(const char* ssid, const char* pass, uint32_t timeoutMs) {
 // Diagnostic: list every 2.4 GHz network the ESP32 can actually see.
 // If a target SSID is missing here, it is 5 GHz or out of range — not a
 // password problem. Flags whether our two SSIDs are visible.
+static bool g_seen1 = false, g_seen2 = false;   // set by scanWiFi(): are our SSIDs visible?
+
 static void scanWiFi() {
+  g_seen1 = false; g_seen2 = false;
   Serial.println("WiFi: scanning (2.4 GHz only — the ESP32 cannot see 5 GHz)...");
   int n = WiFi.scanNetworks();
   if (n <= 0) { Serial.println("  (no networks found)"); return; }
-  bool seen1 = false, seen2 = false;
   for (int i = 0; i < n; i++) {
     String ssid = WiFi.SSID(i);
-    if (ssid == WIFI_SSID)  seen1 = true;
-    if (ssid == WIFI_SSID2) seen2 = true;
+    if (ssid == WIFI_SSID)  g_seen1 = true;
+    if (ssid == WIFI_SSID2) g_seen2 = true;
     Serial.printf("  %2d) ch%-2d  %4d dBm  %-4s  \"%s\"\n",
                   i + 1, WiFi.channel(i), WiFi.RSSI(i),
                   (WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "open" : "enc"),
                   ssid.c_str());
   }
   Serial.printf("WiFi: \"%s\" visible: %s | \"%s\" visible: %s\n",
-                WIFI_SSID,  seen1 ? "YES" : "NO (5 GHz or out of range)",
-                WIFI_SSID2, seen2 ? "YES" : "NO (5 GHz or out of range)");
+                WIFI_SSID,  g_seen1 ? "YES" : "NO (5 GHz or out of range)",
+                WIFI_SSID2, g_seen2 ? "YES" : "NO (5 GHz or out of range)");
   WiFi.scanDelete();
 }
 
@@ -235,13 +237,18 @@ static void connectWiFi(uint32_t timeoutMs) {
 
   scanWiFi();
 
-  bool ok = tryConnect(WIFI_SSID, WIFI_PASS, timeoutMs);
-  if (!ok) {
-    Serial.println("WiFi: primary failed, trying fallback...");
+  // Only attempt an SSID that the scan actually saw — this avoids wasting
+  // ~15 s timing out on a network that isn't present (so the primary/fallback
+  // order no longer matters; it connects to whichever is in range).
+  bool ok = false;
+  if (g_seen1) ok = tryConnect(WIFI_SSID, WIFI_PASS, timeoutMs);
+  if (!ok && g_seen2) {
     WiFi.disconnect(true);
-    delay(500);
+    delay(300);
     ok = tryConnect(WIFI_SSID2, WIFI_PASS2, timeoutMs);
   }
+  if (!ok && !g_seen1 && !g_seen2)
+    Serial.println("WiFi: neither SSID in range this scan — will retry on reconnect.");
 
   if (ok) {
     Serial.print("WiFi connected. IP: ");
@@ -253,6 +260,66 @@ static void connectWiFi(uint32_t timeoutMs) {
     }
   } else {
     Serial.println("WiFi NOT connected — physical buttons still work; will keep retrying.");
+  }
+}
+
+// Active WiFi self-repair: if the link drops it doesn't just wait — it keeps
+// actively reconnecting, escalates to a full radio reset + rescan if that
+// fails, and as a last resort reboots (only when no motor is running, so a
+// pump is never dropped to fix WiFi). All non-blocking except a ~2 s rescan
+// during the escalation step, which is rare and watchdog-guarded.
+static uint32_t g_lastWifiTry     = 0;
+static bool     g_wifiTryFallback = false;
+static uint32_t g_wifiDownSince   = 0;   // millis when the link went down (0 = up)
+static uint16_t g_wifiFails       = 0;   // consecutive failed attempts
+
+static bool anyMotorRunning() {
+  for (uint8_t i = 0; i < MOTOR_COUNT; i++) if (motors[i].state == M_RUNNING) return true;
+  return false;
+}
+
+static void wifiMaintain(uint32_t now) {
+  static bool wasConnected = false;
+  bool conn = (WiFi.status() == WL_CONNECTED);
+
+  if (conn) {
+    if (!wasConnected) { Serial.print("[wifi] (re)connected, IP: "); Serial.println(WiFi.localIP()); }
+    wasConnected = true; g_wifiDownSince = 0; g_wifiFails = 0;
+    return;
+  }
+  if (wasConnected) { Serial.println("[wifi] link lost — recovering..."); wasConnected = false; g_wifiDownSince = now; }
+  if (g_wifiDownSince == 0) g_wifiDownSince = now;
+
+  if (now - g_lastWifiTry < 10000) return;   // one action every 10 s
+  g_lastWifiTry = now;
+  g_wifiFails++;
+
+  // Step 2: every ~60 s still down -> reset the radio and re-scan (diagnose).
+  if (g_wifiFails % 6 == 0) {
+    Serial.println("[wifi] self-repair: resetting radio + rescanning...");
+    esp_task_wdt_reset();
+    WiFi.persistent(false);
+    WiFi.disconnect(true, true);      // drop + forget
+    WiFi.mode(WIFI_OFF); delay(200); WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+    scanWiFi();                        // ~2 s; sets g_seen1/g_seen2 and logs visibility
+    esp_task_wdt_reset();
+    if      (g_seen1) WiFi.begin(WIFI_SSID,  WIFI_PASS);
+    else if (g_seen2) WiFi.begin(WIFI_SSID2, WIFI_PASS2);
+    else              Serial.println("[wifi] neither SSID visible — AP down / out of range");
+    return;
+  }
+
+  // Step 1: normal active retry, alternating SSIDs (non-blocking).
+  if (g_wifiTryFallback) { Serial.printf("[wifi] retry \"%s\"\n", WIFI_SSID2); WiFi.begin(WIFI_SSID2, WIFI_PASS2); }
+  else                   { Serial.printf("[wifi] retry \"%s\"\n", WIFI_SSID);  WiFi.begin(WIFI_SSID,  WIFI_PASS);  }
+  g_wifiTryFallback = !g_wifiTryFallback;
+
+  // Step 3: last resort — down > 10 min AND nothing running -> reboot to self-heal.
+  if ((now - g_wifiDownSince) > 600000UL && !anyMotorRunning()) {
+    Serial.println("[wifi] down >10 min, all motors off — rebooting to self-heal");
+    delay(50);
+    ESP.restart();
   }
 }
 
@@ -350,6 +417,31 @@ static void transition(Motor& m, MotorState to, const char* cause) {
   g_stateDirty = true;   // reflect the change to MQTT subscribers
 }
 
+// ---- Status LED (GPIO16), single LED with distinct patterns ----
+//   READY      (WiFi + MQTT, no faults) : solid ON
+//   NO SIGNAL  (no WiFi)                : fast blink   (~5 Hz)
+//   CLOUD DOWN (WiFi up, MQTT not conn.): slow blink   (~1 Hz)
+//   FAULT      (any motor in LOCKOUT)   : double-blink (blip-blip, then pause)
+static void updateStateLed(uint32_t now) {
+  uint8_t level;
+  if (WiFi.status() != WL_CONNECTED) {
+    level = ((now / 100) & 1) ? HIGH : LOW;            // NO SIGNAL: fast blink
+  } else if (!mqtt.connected()) {
+    level = ((now / 500) & 1) ? HIGH : LOW;            // CLOUD DOWN: slow blink
+  } else {
+    bool fault = false;
+    for (uint8_t i = 0; i < MOTOR_COUNT; i++)
+      if (motors[i].state == M_LOCKOUT) { fault = true; break; }
+    if (fault) {
+      uint32_t p = now % 1500;                          // FAULT: double-blink
+      level = (p < 120 || (p >= 300 && p < 420)) ? HIGH : LOW;
+    } else {
+      level = HIGH;                                     // READY: solid ON
+    }
+  }
+  digitalWrite(STATE_LED_PIN, level);
+}
+
 // ======================= SETUP / LOOP ================================
 void setup() {
   // 1) Force every relay OFF as the very first action after reset.
@@ -357,8 +449,8 @@ void setup() {
     pinMode(MOTOR_PINS[i].relayPin, OUTPUT);
     digitalWrite(MOTOR_PINS[i].relayPin, RELAY_OFF);
   }
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
+  pinMode(STATE_LED_PIN, OUTPUT);
+  digitalWrite(STATE_LED_PIN, LOW);
 
   Serial.begin(115200);
   delay(50);
@@ -406,7 +498,10 @@ void setup() {
 
 void loop() {
   esp_task_wdt_reset();          // pet the watchdog
+  uint32_t now = millis();
   server.handleClient();         // serve LAN dashboard requests (non-blocking)
+
+  wifiMaintain(now);             // keep WiFi up; retry forever if it drops
 
   // MQTT (public path): keep the connection up and pump the client.
   if (WiFi.status() == WL_CONNECTED) {
@@ -414,39 +509,24 @@ void loop() {
     mqtt.loop();
   }
 
-  uint32_t now = millis();
-
-  bool anyRunning = false;
-
   for (uint8_t i = 0; i < MOTOR_COUNT; i++) {
     Motor& m = motors[i];
 
-    // ---- Read buttons -> feed the command API ----
-    m.startBtn.update(now, DEBOUNCE_MS);
-    bool stopChanged = m.stopBtn.update(now, DEBOUNCE_MS);
-
-    // Start button: falling edge (HIGH->LOW) = a fresh press = start request.
-    if (m.prevStart == HIGH && m.startBtn.stable == LOW) {
-      cmdStart(i);
-      Serial.printf("[%s] start button pressed\n", m.name);
+    // ---- Read the single toggle button -> feed the command API ----
+    // NO momentary: a press shorts the pin to GND (falling edge HIGH->LOW).
+    // Press TOGGLES: off -> start, running/lockout -> stop.
+    m.button.update(now, DEBOUNCE_MS);
+    if (m.prevBtn == HIGH && m.button.stable == LOW) {
+      if (m.state == M_OFF) { cmdStart(i); Serial.printf("[%s] button: start\n", m.name); }
+      else                  { cmdStop(i);  Serial.printf("[%s] button: stop\n",  m.name); }
     }
-    m.prevStart = m.startBtn.stable;
-
-    // Stop: level-based. HIGH = stop/cut = a continuous stop condition.
-    bool stopActive = (m.stopBtn.stable == HIGH);
-    if (stopChanged && stopActive) {
-      cmdStop(i);
-      Serial.printf("[%s] stop asserted (button pressed or wire cut)\n", m.name);
-    }
+    m.prevBtn = m.button.stable;
 
     // ---- State machine ----
     switch (m.state) {
       case M_OFF:
-        // A stop condition clears any pending start and blocks starting.
-        if (stopActive || m.stopReq) {
-          m.startReq = false;
-          m.stopReq  = false;
-        } else if (m.startReq) {
+        m.stopReq = false;                 // already off; nothing to stop
+        if (m.startReq) {
           m.startReq = false;
           if ((now - m.stoppedAt) >= MIN_OFF_MS) {
             transition(m, M_RUNNING, "start requested");
@@ -459,10 +539,10 @@ void loop() {
         break;
 
       case M_RUNNING:
-        if (stopActive || m.stopReq) {
+        if (m.stopReq) {
           m.stopReq  = false;
           m.startReq = false;
-          transition(m, M_OFF, stopActive ? "stop button / wire cut" : "stop requested");
+          transition(m, M_OFF, "stop requested");
         } else if (MAX_RUN_MS > 0 && (now - m.startedAt) >= MAX_RUN_MS) {
           m.startReq = false;
           transition(m, M_LOCKOUT, "max run time exceeded");
@@ -470,9 +550,9 @@ void loop() {
         break;
 
       case M_LOCKOUT:
-        // Latched off. A manual Stop assert (or dashboard cmdStop) clears
-        // the lockout back to a normal OFF state. Starts are ignored.
-        if ((stopChanged && stopActive) || m.stopReq) {
+        // Latched off after max-run. A Stop press (or dashboard stop) resets
+        // it back to a normal OFF state. Starts are ignored.
+        if (m.stopReq) {
           m.stopReq  = false;
           m.startReq = false;
           transition(m, M_OFF, "lockout reset");
@@ -482,10 +562,11 @@ void loop() {
         break;
     }
 
-    if (m.isRunning()) anyRunning = true;
+    // Per-motor run LED: ON while this motor is RUNNING.
+    m.applyLed(m.isRunning() ? LED_ON : LED_OFF);
   }
 
-  digitalWrite(LED_PIN, anyRunning ? HIGH : LOW);
+  updateStateLed(now);
 
   // Publish state to MQTT on change, and as a heartbeat every 15 s.
   if (mqtt.connected() && (g_stateDirty || (now - g_lastPubMs) >= 15000)) {

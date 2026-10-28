@@ -181,7 +181,7 @@
   var WS_PORT = "8884";
   var TOPIC_CMD = "pump/cmd", TOPIC_STATE = "pump/state", TOPIC_STATUS = "pump/status";
   var LS_KEY = "pump-control-conn";
-  var MIN_OFF_MS = 2000;
+  var MIN_OFF_MS = 0;      // 0 = no restart delay (matches firmware)
   var client = null, lastMotors = null, cooldownUntil = {}, prevState = {}, startBtns = {};
   var $ = function (id) { return document.getElementById(id); };
 

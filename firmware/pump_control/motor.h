@@ -1,5 +1,5 @@
 /*
- * motor.h — types for the two-motor pump controller.
+ * motor.h — types for the pump controller.
  *
  * These live in a header (not the .ino) so the Arduino build's auto-
  * generated function prototypes, which reference `Motor`, are placed
@@ -12,12 +12,16 @@
 static const uint8_t RELAY_ON  = LOW;   // IN=LOW  -> relay energized (motor ON)
 static const uint8_t RELAY_OFF = HIGH;  // IN=HIGH -> relay off        (boot default)
 
+// ---- Run-LED logic (external LED -> resistor -> GND, so active-HIGH) ----
+static const uint8_t LED_ON  = HIGH;
+static const uint8_t LED_OFF = LOW;
+
 // Pin bundle for one motor.
 struct MotorPins {
   const char* name;
-  uint8_t     relayPin;   // active-low relay IN
-  uint8_t     startPin;   // momentary NO -> GND (INPUT_PULLUP, pressed = LOW)
-  uint8_t     stopPin;    // momentary NC -> GND (INPUT_PULLUP, HIGH = stop/cut)
+  uint8_t     relayPin;    // active-low relay IN
+  uint8_t     buttonPin;   // single momentary NO -> GND (INPUT_PULLUP); press toggles
+  uint8_t     ledPin;      // run indicator LED (ON while RUNNING)
 };
 
 // ---------------------------------------------------------------------
@@ -68,36 +72,39 @@ inline const char* stateName(MotorState s) {
 struct Motor {
   const char* name;
   uint8_t     relayPin;
-  Debouncer   startBtn;   // NO: pressed = LOW
-  Debouncer   stopBtn;    // NC: HIGH = stop/cut
+  uint8_t     ledPin;
+  Debouncer   button;     // single NO momentary: pressed = LOW; press = TOGGLE
 
   MotorState  state;
   uint32_t    stoppedAt;  // millis() when it last entered OFF/LOCKOUT
   uint32_t    startedAt;  // millis() when it last entered RUNNING
-  int         prevStart;  // previous debounced START level (for edge detect)
+  int         prevBtn;    // previous debounced button level (for edge detect)
 
-  // Latched command requests from ANY source (buttons or dashboard).
+  // Latched command requests from ANY source (button or dashboard).
   volatile bool startReq;
   volatile bool stopReq;
 
   void begin(const MotorPins& p) {
     name     = p.name;
     relayPin = p.relayPin;
+    ledPin   = p.ledPin;
 
     pinMode(relayPin, OUTPUT);
     digitalWrite(relayPin, RELAY_OFF);   // OFF before anything else
+    pinMode(ledPin, OUTPUT);
+    digitalWrite(ledPin, LED_OFF);
 
-    startBtn.begin(p.startPin);
-    stopBtn.begin(p.stopPin);
+    button.begin(p.buttonPin);
 
     state     = M_OFF;
     stoppedAt = millis();
     startedAt = 0;
-    prevStart = HIGH;   // released
+    prevBtn   = HIGH;   // released
     startReq  = false;
     stopReq   = false;
   }
 
   void applyRelay(uint8_t level) { digitalWrite(relayPin, level); }
+  void applyLed(uint8_t level)   { digitalWrite(ledPin, level); }
   bool isRunning() const { return state == M_RUNNING; }
 };
